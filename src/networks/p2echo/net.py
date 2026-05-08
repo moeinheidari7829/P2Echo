@@ -105,6 +105,11 @@ class P2Echo(nn.Module):
         ita_gamma_init: float = 3.0,
         ita_lambda_init: float = 0.01,
         ita_dual_injection: bool = False,
+        ita_disable_dynamic_projection: bool = False,
+        ita_disable_dynamic_kernel: bool = False,
+        ita_disable_token_differential: bool = False,
+        num_decoder_mask_fusions: Optional[int] = None,
+        disable_text_conditioning: bool = False,
     ) -> None:
         super().__init__()
         
@@ -122,6 +127,20 @@ class P2Echo(nn.Module):
                 "Choose from {'cenet', 'ita', 'ita_nocfa'} (or alias 'dyITA_NoCFA')."
             )
         self.decoder_type = decoder_type
+        self.disable_text_conditioning = bool(disable_text_conditioning)
+        # Ablation: number of decoder-stage mask embedding fusions to keep.
+        # Semantics (matches paper-facing "3 fusion layers" framing):
+        #   - For ita / cenet: controls the 3 decoder stages (dec3, dec2, dec1)
+        #   - For ita_nocfa: controls the 3 upsampling decoder stages (dec3, dec2, dec1),
+        #     while bottleneck dec4 text fusion remains enabled.
+        if num_decoder_mask_fusions is None:
+            self.num_decoder_mask_fusions = None
+        else:
+            self.num_decoder_mask_fusions = int(num_decoder_mask_fusions)
+            if self.num_decoder_mask_fusions < 1 or self.num_decoder_mask_fusions > 3:
+                raise ValueError(
+                    f"num_decoder_mask_fusions must be in [1,3] or None, got {num_decoder_mask_fusions}"
+                )
         
         # =====================================================================
         # Encoder: PVT-v2-B2
@@ -143,29 +162,30 @@ class P2Echo(nn.Module):
         # Text Conditioning: Cross-Attention Transformer
         # =====================================================================
         # Project bottleneck features to query dimension
-        self.project_bottleneck = nn.Linear(self.bottleneck_channels, query_dim)
-        
-        # Project text embeddings to query dimension
-        self.project_text = nn.Linear(text_embedding_dim, query_dim)
-        
-        # 2D positional encoding for bottleneck spatial features
-        # For 256x256 input with PVT-v2: bottleneck is 8x8 (256/32)
-        h, w = img_size[0] // 32, img_size[1] // 32
-        self._init_pos_embed(h, w, query_dim)
-        
-        # Transformer cross-attention decoder
-        decoder_layer = TransformerDecoderLayer(
-            d_model=query_dim,
-            nhead=transformer_heads,
-            dim_feedforward=transformer_ffn_dim,
-            dropout=0.1,
-            activation="gelu",
-        )
-        self.transformer_decoder = TransformerDecoder(
-            decoder_layer=decoder_layer,
-            num_layers=transformer_layers,
-            norm=nn.LayerNorm(query_dim),
-        )
+        if not self.disable_text_conditioning:
+            self.project_bottleneck = nn.Linear(self.bottleneck_channels, query_dim)
+            
+            # Project text embeddings to query dimension
+            self.project_text = nn.Linear(text_embedding_dim, query_dim)
+            
+            # 2D positional encoding for bottleneck spatial features
+            # For 256x256 input with PVT-v2: bottleneck is 8x8 (256/32)
+            h, w = img_size[0] // 32, img_size[1] // 32
+            self._init_pos_embed(h, w, query_dim)
+            
+            # Transformer cross-attention decoder
+            decoder_layer = TransformerDecoderLayer(
+                d_model=query_dim,
+                nhead=transformer_heads,
+                dim_feedforward=transformer_ffn_dim,
+                dropout=0.1,
+                activation="gelu",
+            )
+            self.transformer_decoder = TransformerDecoder(
+                decoder_layer=decoder_layer,
+                num_layers=transformer_layers,
+                norm=nn.LayerNorm(query_dim),
+            )
         
         # Mask embedding projections for text injection.
         # - cenet / ita: projections for stages 3->1 = [320, 128, 64]
@@ -176,12 +196,14 @@ class P2Echo(nn.Module):
             decoder_in_channels if self.decoder_type == "ita_nocfa"
             else decoder_in_channels[1:]
         )
+        self.inject_proj_channels = [int(ch) for ch in inject_proj_channels]
         for ch in inject_proj_channels:
-            self.inject_mask_projs.append(nn.Sequential(
-                nn.Linear(query_dim, query_dim // 2),
-                nn.GELU(),
-                nn.Linear(query_dim // 2, int(ch)),
-            ))
+            if not self.disable_text_conditioning:
+                self.inject_mask_projs.append(nn.Sequential(
+                    nn.Linear(query_dim, query_dim // 2),
+                    nn.GELU(),
+                    nn.Linear(query_dim // 2, int(ch)),
+                ))
         
         # =====================================================================
         # Decoder: CENet-style or DyITA decoder
@@ -200,6 +222,9 @@ class P2Echo(nn.Module):
                 gamma_init=ita_gamma_init,
                 lambda_init=ita_lambda_init,
                 dual_injection=ita_dual_injection,
+                disable_dynamic_projection=ita_disable_dynamic_projection,
+                disable_dynamic_kernel=ita_disable_dynamic_kernel,
+                disable_token_differential=ita_disable_token_differential,
                 deep_supervision=deep_supervision,
             )
         elif self.decoder_type == "ita_nocfa":
@@ -216,6 +241,9 @@ class P2Echo(nn.Module):
                 gamma_init=ita_gamma_init,
                 lambda_init=ita_lambda_init,
                 dual_injection=ita_dual_injection,
+                disable_dynamic_projection=ita_disable_dynamic_projection,
+                disable_dynamic_kernel=ita_disable_dynamic_kernel,
+                disable_token_differential=ita_disable_token_differential,
                 deep_supervision=deep_supervision,
             )
         else:
@@ -248,11 +276,12 @@ class P2Echo(nn.Module):
     
     def _init_weights(self) -> None:
         """Initialize projection layers."""
-        for m in [self.project_bottleneck, self.project_text]:
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
+        if not self.disable_text_conditioning:
+            for m in [self.project_bottleneck, self.project_text]:
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
                     
         for proj in self.inject_mask_projs:
             for m in proj.modules():
@@ -264,7 +293,7 @@ class P2Echo(nn.Module):
     def forward(
         self, 
         img: torch.Tensor, 
-        text_embedding: torch.Tensor
+        text_embedding: Optional[torch.Tensor]
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Forward pass.
@@ -289,41 +318,93 @@ class P2Echo(nn.Module):
         # encoder_features: [f1, f2, f3, f4] = [(B,64,H/4,W/4), ..., (B,512,H/32,W/32)]
         
         # =====================================================================
-        # 2. Text-Image Cross-Attention (with self-attention among prompts)
+        # 2. Text conditioning (or ablated no-text path)
         # =====================================================================
-        bottleneck = encoder_features[-1]  # [B, 512, H/32, W/32]
-        
-        # Project bottleneck: [B, 512, h, w] -> [B, h, w, 384] -> [hw, B, 384]
-        bottleneck_embed = rearrange(bottleneck, "b c h w -> b h w c")
-        bottleneck_embed = self.project_bottleneck(bottleneck_embed)
-        bottleneck_embed = rearrange(bottleneck_embed, "b h w c -> (h w) b c")
-        
-        # Project text: [B, N, D] -> [N, B, 384]
-        if text_embedding.ndim == 4:
-            text_embedding = text_embedding.squeeze(2)
-        text_embed = rearrange(text_embedding, "b n d -> n b d")
-        text_embed = self.project_text(text_embed)
-        
-        # Self-attention among prompts + cross-attention to image features
-        mask_embedding, _ = self.transformer_decoder(
-            tgt=text_embed,           # [N, B, 384] - queries
-            memory=bottleneck_embed,  # [HW, B, 384] - keys/values
-            pos=self.pos_embed,       # [HW, 1, 384] - positional encoding
-        )
-        # mask_embedding: [N, B, 384]
-        
-        # Rearrange to [B, N, query_dim] for per-stage projection
-        mask_embedding = rearrange(mask_embedding, "n b c -> b n c")  # [B, N, query_dim]
-        
-        # Project mask embeddings for injection at decoder stages 1-3
-        inject_mask_embeds = [proj(mask_embedding) for proj in self.inject_mask_projs]
+        if self.disable_text_conditioning:
+            b = img.shape[0]
+            if text_embedding is None:
+                n_prompts = int(self.num_classes)
+            else:
+                if text_embedding.ndim == 4:
+                    text_embedding = text_embedding.squeeze(2)
+                n_prompts = int(text_embedding.shape[1])
+            inject_mask_embeds = [
+                encoder_features[-1].new_zeros((b, n_prompts, ch))
+                for ch in self.inject_proj_channels
+            ]
+        else:
+            bottleneck = encoder_features[-1]  # [B, 512, H/32, W/32]
+            
+            # Project bottleneck: [B, 512, h, w] -> [B, h, w, 384] -> [hw, B, 384]
+            bottleneck_embed = rearrange(bottleneck, "b c h w -> b h w c")
+            bottleneck_embed = self.project_bottleneck(bottleneck_embed)
+            bottleneck_embed = rearrange(bottleneck_embed, "b h w c -> (h w) b c")
+            
+            # Project text: [B, N, D] -> [N, B, 384]
+            if text_embedding is None:
+                raise ValueError("text_embedding cannot be None unless disable_text_conditioning=True")
+            if text_embedding.ndim == 4:
+                text_embedding = text_embedding.squeeze(2)
+            text_embed = rearrange(text_embedding, "b n d -> n b d")
+            text_embed = self.project_text(text_embed)
+            
+            # Self-attention among prompts + cross-attention to image features
+            mask_embedding, _ = self.transformer_decoder(
+                tgt=text_embed,           # [N, B, 384] - queries
+                memory=bottleneck_embed,  # [HW, B, 384] - keys/values
+                pos=self.pos_embed,       # [HW, 1, 384] - positional encoding
+            )
+            # mask_embedding: [N, B, 384]
+            
+            # Rearrange to [B, N, query_dim] for per-stage projection
+            mask_embedding = rearrange(mask_embedding, "n b c -> b n c")  # [B, N, query_dim]
+            
+            # Project mask embeddings for injection at decoder stages 1-3
+            inject_mask_embeds = [proj(mask_embedding) for proj in self.inject_mask_projs]
         # cenet/ita: [B,N,320], [B,N,128], [B,N,64]
         # ita_nocfa: [B,N,512], [B,N,320], [B,N,128], [B,N,64]
+
+        # Optional ablation: reduce number of decoder-stage mask embedding fusions
+        # by zeroing selected stage embeddings (shape-preserving).
+        if self.num_decoder_mask_fusions is not None:
+            inject_mask_embeds = self._apply_decoder_mask_fusion_ablation(inject_mask_embeds)
         
         # =====================================================================
         # 3. Decoder: Single pass with all N embeddings injected together
         # =====================================================================
         return self.decoder(encoder_features, inject_mask_embeds)
+
+    def _apply_decoder_mask_fusion_ablation(self, inject_mask_embeds: List[torch.Tensor]) -> List[torch.Tensor]:
+        """Keep only the last K decoder-stage fusions (closest to output), zero the rest.
+
+        For ``ita_nocfa``:
+          inject_mask_embeds = [dec4, dec3, dec2, dec1]
+          K applies to [dec3, dec2, dec1] only; dec4 stays enabled.
+
+        For ``ita`` / ``cenet``:
+          inject_mask_embeds = [dec3, dec2, dec1]
+          K applies to all three.
+        """
+        k = self.num_decoder_mask_fusions
+        if k is None:
+            return inject_mask_embeds
+
+        out = list(inject_mask_embeds)
+        if self.decoder_type == "ita_nocfa":
+            if len(out) != 4:
+                return out
+            candidate_indices = [1, 2, 3]  # dec3, dec2, dec1 (bottleneck dec4 left intact)
+        else:
+            candidate_indices = list(range(len(out)))
+            if len(candidate_indices) > 3:
+                # Defensive fallback; expected max is 3 for current decoders.
+                candidate_indices = candidate_indices[-3:]
+
+        keep_indices = set(candidate_indices[-int(k):])  # keep dec1 first, then dec2, then dec3
+        for idx in candidate_indices:
+            if idx not in keep_indices:
+                out[idx] = torch.zeros_like(out[idx])
+        return out
 
     def get_encoder_params(self):
         """Get encoder parameters (for separate learning rate)."""
@@ -335,6 +416,8 @@ class P2Echo(nn.Module):
     
     def get_text_conditioning_params(self):
         """Get text conditioning parameters (projections + transformer)."""
+        if self.disable_text_conditioning:
+            return []
         params = []
         params.extend(self.project_bottleneck.parameters())
         params.extend(self.project_text.parameters())

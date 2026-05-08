@@ -59,12 +59,21 @@ export TOKENIZERS_PARALLELISM=false
 
 RUN_NAME=${RUN_NAME:-"p2echo_dyita_splits_new"}
 TEXT_MODEL=${TEXT_MODEL:-"Qwen/Qwen3-Embedding-0.6B"}
+TOTAL_EPOCHS=${TOTAL_EPOCHS:-300}
+RESUME_CKPT=${RESUME_CKPT:-"./outputs/${RUN_NAME}/checkpoints/latest.pth"}
+
+if [[ ! -f "${RESUME_CKPT}" ]]; then
+    echo "[ERROR] Resume checkpoint not found: ${RESUME_CKPT}"
+    exit 1
+fi
 
 echo "=============================================="
-echo "[INFO] Starting P2Echo-new training..."
+echo "[INFO] Resuming P2Echo-new training..."
 echo "  run_name: ${RUN_NAME}"
 echo "  text_model: ${TEXT_MODEL}"
 echo "  splits_json: ${SAM3_SPLITS_JSON}"
+echo "  resume_ckpt: ${RESUME_CKPT}"
+echo "  total_epochs: ${TOTAL_EPOCHS}"
 echo "=============================================="
 
 # Run training
@@ -81,7 +90,7 @@ python src/train.py \
     --pretrained_dir "./pretrained_pth" \
     --text_model "${TEXT_MODEL}" \
     --text_cache_dir "${HF_HOME}/hub" \
-    --epochs 200 \
+    --epochs "${TOTAL_EPOCHS}" \
     --optimizer sgd \
     --lr 0.01 \
     --momentum 0.9 \
@@ -94,4 +103,5 @@ python src/train.py \
     --save_interval 10 \
     --val_interval 1 \
     --seed 42 \
+    --resume "${RESUME_CKPT}" \
     "$@"

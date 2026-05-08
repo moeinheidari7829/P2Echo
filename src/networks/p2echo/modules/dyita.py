@@ -85,30 +85,41 @@ class DynamicProjectionModule(nn.Module):
         head_dim: int,
         n_heads: int,
         n_projectors: int = 3,
+        disable_dynamic_projection: bool = False,
     ) -> None:
         super().__init__()
         inner = head_dim * n_heads
         self.n_heads = n_heads
         self.head_dim = head_dim
         self.n_projectors = n_projectors
+        self.disable_dynamic_projection = bool(disable_dynamic_projection)
 
         # --- shared projections (standard) ---
         self.q_proj = nn.Linear(img_dim, inner, bias=False)
         self.k_proj = nn.Linear(txt_dim, inner, bias=False)
         self.v_proj = nn.Linear(txt_dim, inner, bias=False)
 
-        # --- routable redundancy projectors for Q' and K' ---
-        # Each bank: Linear(in_dim, inner)
-        self.q_prime_banks = nn.ModuleList([
-            nn.Linear(img_dim, inner, bias=False) for _ in range(n_projectors)
-        ])
-        self.k_prime_banks = nn.ModuleList([
-            nn.Linear(txt_dim, inner, bias=False) for _ in range(n_projectors)
-        ])
-
-        # --- routers ---
-        self.router_q = nn.Linear(img_dim, n_projectors, bias=False)
-        self.router_k = nn.Linear(txt_dim, n_projectors, bias=False)
+        # --- redundancy projections ---
+        if self.disable_dynamic_projection:
+            # Ablation: single static projector (no routing, no projector bank).
+            self.q_prime_static = nn.Linear(img_dim, inner, bias=False)
+            self.k_prime_static = nn.Linear(txt_dim, inner, bias=False)
+            self.q_prime_banks = None
+            self.k_prime_banks = None
+            self.router_q = None
+            self.router_k = None
+        else:
+            # Routable projector banks for Q' and K'.
+            self.q_prime_static = None
+            self.k_prime_static = None
+            self.q_prime_banks = nn.ModuleList([
+                nn.Linear(img_dim, inner, bias=False) for _ in range(n_projectors)
+            ])
+            self.k_prime_banks = nn.ModuleList([
+                nn.Linear(txt_dim, inner, bias=False) for _ in range(n_projectors)
+            ])
+            self.router_q = nn.Linear(img_dim, n_projectors, bias=False)
+            self.router_k = nn.Linear(txt_dim, n_projectors, bias=False)
 
         self._init_weights()
 
@@ -134,22 +145,25 @@ class DynamicProjectionModule(nn.Module):
         K = self.k_proj(txt_tokens)    # [B, N, inner]
         V = self.v_proj(txt_tokens)    # [B, N, inner]
 
-        # --- Route Q' ---
-        q_scores = self.router_q(img_tokens)          # [B, S, n_P]
-        q_route = _ste_argmax_route(q_scores)          # [B, S, n_P]
-        # Compute all banks then mix via one-hot
-        q_primes = torch.stack(
-            [bank(img_tokens) for bank in self.q_prime_banks], dim=-1
-        )  # [B, S, inner, n_P]
-        Q_prime = (q_primes * q_route.unsqueeze(2)).sum(dim=-1)  # [B, S, inner]
+        if self.disable_dynamic_projection:
+            Q_prime = self.q_prime_static(img_tokens)  # [B, S, inner]
+            K_prime = self.k_prime_static(txt_tokens)  # [B, N, inner]
+        else:
+            # --- Route Q' ---
+            q_scores = self.router_q(img_tokens)      # [B, S, n_P]
+            q_route = _ste_argmax_route(q_scores)     # [B, S, n_P]
+            q_primes = torch.stack(
+                [bank(img_tokens) for bank in self.q_prime_banks], dim=-1
+            )  # [B, S, inner, n_P]
+            Q_prime = (q_primes * q_route.unsqueeze(2)).sum(dim=-1)  # [B, S, inner]
 
-        # --- Route K' ---
-        k_scores = self.router_k(txt_tokens)          # [B, N, n_P]
-        k_route = _ste_argmax_route(k_scores)          # [B, N, n_P]
-        k_primes = torch.stack(
-            [bank(txt_tokens) for bank in self.k_prime_banks], dim=-1
-        )  # [B, N, inner, n_P]
-        K_prime = (k_primes * k_route.unsqueeze(2)).sum(dim=-1)  # [B, N, inner]
+            # --- Route K' ---
+            k_scores = self.router_k(txt_tokens)      # [B, N, n_P]
+            k_route = _ste_argmax_route(k_scores)     # [B, N, n_P]
+            k_primes = torch.stack(
+                [bank(txt_tokens) for bank in self.k_prime_banks], dim=-1
+            )  # [B, N, inner, n_P]
+            K_prime = (k_primes * k_route.unsqueeze(2)).sum(dim=-1)  # [B, N, inner]
 
         # Reshape to multi-head: [B, n_heads, seq, head_dim]
         def _to_heads(x: torch.Tensor) -> torch.Tensor:
@@ -353,6 +367,9 @@ class DyITAModule(nn.Module):
         gamma_init: float = 3.0,
         lambda_init: float = 0.01,
         dropout: float = 0.0,
+        disable_dynamic_projection: bool = False,
+        disable_dynamic_kernel: bool = False,
+        disable_token_differential: bool = False,
     ) -> None:
         super().__init__()
         if txt_dim is None:
@@ -361,6 +378,10 @@ class DyITAModule(nn.Module):
         self.txt_dim = txt_dim
         self.n_heads = n_heads
         self.head_dim = img_dim // n_heads
+        self.disable_dynamic_projection = bool(disable_dynamic_projection)
+        self.disable_dynamic_kernel = bool(disable_dynamic_kernel)
+        self.disable_token_differential = bool(disable_token_differential)
+        self.softmax_threshold = 16
         assert img_dim % n_heads == 0, f"img_dim {img_dim} must be divisible by n_heads {n_heads}"
 
         # 1. Dynamic Projection
@@ -370,21 +391,31 @@ class DyITAModule(nn.Module):
             head_dim=self.head_dim,
             n_heads=n_heads,
             n_projectors=n_projectors,
+            disable_dynamic_projection=self.disable_dynamic_projection,
         )
 
         # 2. Dynamic Measure Kernel (applied per-head to Q, K, Q', K')
-        self.kernel_q = DynamicMeasureKernel(self.head_dim, n_kernel_factors, gamma_init)
-        self.kernel_k = DynamicMeasureKernel(self.head_dim, n_kernel_factors, gamma_init)
-        self.kernel_q_prime = DynamicMeasureKernel(self.head_dim, n_kernel_factors, gamma_init)
-        self.kernel_k_prime = DynamicMeasureKernel(self.head_dim, n_kernel_factors, gamma_init)
+        if self.disable_dynamic_kernel:
+            self.kernel_q = nn.Identity()
+            self.kernel_k = nn.Identity()
+            self.kernel_q_prime = nn.Identity()
+            self.kernel_k_prime = nn.Identity()
+        else:
+            self.kernel_q = DynamicMeasureKernel(self.head_dim, n_kernel_factors, gamma_init)
+            self.kernel_k = DynamicMeasureKernel(self.head_dim, n_kernel_factors, gamma_init)
+            self.kernel_q_prime = DynamicMeasureKernel(self.head_dim, n_kernel_factors, gamma_init)
+            self.kernel_k_prime = DynamicMeasureKernel(self.head_dim, n_kernel_factors, gamma_init)
 
         # 3. Token Differential Operator
-        self.tdo = TokenDifferentialOperator(
-            dim=2 * self.head_dim,  # concat(Q̃, Q̃') dim
-            head_dim=self.head_dim,
-            n_diff_factors=n_diff_factors,
-            lambda_init=lambda_init,
-        )
+        if self.disable_token_differential:
+            self.tdo = None
+        else:
+            self.tdo = TokenDifferentialOperator(
+                dim=2 * self.head_dim,  # concat(Q̃, Q̃') dim
+                head_dim=self.head_dim,
+                n_diff_factors=n_diff_factors,
+                lambda_init=lambda_init,
+            )
 
         # 4. DWC(V) residual — provides local spatial bias (critical for segmentation)
         # Applied to image features in BCHW format
@@ -432,8 +463,18 @@ class DyITAModule(nn.Module):
         Q_prime_t = self.kernel_q_prime(Q_prime)
         K_prime_t = self.kernel_k_prime(K_prime)
 
-        # 3. Token Differential Operator
-        O = self.tdo(Q_t, Q_prime_t, K_t, K_prime_t, V)   # [B, heads, S, hd]
+        # 3. Token Differential Operator (or ablation fallback)
+        if self.disable_token_differential:
+            N = K_t.shape[2]
+            if N <= self.softmax_threshold:
+                attn_scores = torch.matmul(Q_t, K_t.transpose(-2, -1)) * self.scale
+                attn_weights = F.softmax(attn_scores, dim=-1)
+                O = torch.matmul(attn_weights, V)
+            else:
+                KV = torch.matmul(K_t.transpose(-2, -1), V)
+                O = torch.matmul(Q_t, KV)
+        else:
+            O = self.tdo(Q_t, Q_prime_t, K_t, K_prime_t, V)   # [B, heads, S, hd]
 
         # Scale
         O = O * self.scale
@@ -593,6 +634,9 @@ class ITABlock(nn.Module):
         n_diff_factors: int = 9,
         gamma_init: float = 3.0,
         lambda_init: float = 0.01,
+        disable_dynamic_projection: bool = False,
+        disable_dynamic_kernel: bool = False,
+        disable_token_differential: bool = False,
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
@@ -612,6 +656,9 @@ class ITABlock(nn.Module):
             gamma_init=gamma_init,
             lambda_init=lambda_init,
             dropout=drop_rate,
+            disable_dynamic_projection=disable_dynamic_projection,
+            disable_dynamic_kernel=disable_dynamic_kernel,
+            disable_token_differential=disable_token_differential,
         )
 
         # Gated Conv FFN

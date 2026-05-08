@@ -35,11 +35,13 @@ from losses import DeepSupervisionDiceBCELoss
 from metrics import MEDPY_AVAILABLE, MetricAggregator
 from prompts import (
     LABEL_TO_ID,
+    PROMPT_MODES,
     PromptSpec,
     build_background_prompt_text,
     build_prompt_text_from_view,
     default_prompt_specs,
     make_binary_targets,
+    normalize_prompt_mode,
     present_label_set,
     view_label_set,
 )
@@ -373,6 +375,7 @@ def build_text_embeddings(
     gt_mask: torch.Tensor,
     prompt_specs: Sequence[PromptSpec],
     device: torch.device,
+    prompt_mode: str = "view_structure_anatomy",
     prompt_mask: torch.Tensor | None = None,
     valid_mask: torch.Tensor | None = None,
     keep_class_prompts_for_inactive_valid_labels: bool = False,
@@ -384,6 +387,7 @@ def build_text_embeddings(
         planes=planes,
         gt_mask=gt_mask,
         prompt_specs=prompt_specs,
+        prompt_mode=prompt_mode,
         prompt_mask=prompt_mask,
         valid_mask=valid_mask,
         keep_class_prompts_for_inactive_valid_labels=keep_class_prompts_for_inactive_valid_labels,
@@ -400,6 +404,7 @@ def _build_batch_prompt_texts_from_gt(
     planes: Sequence[str],
     gt_mask: torch.Tensor,
     prompt_specs: Sequence[PromptSpec],
+    prompt_mode: str,
     prompt_mask: torch.Tensor | None,
     valid_mask: torch.Tensor | None,
     keep_class_prompts_for_inactive_valid_labels: bool,
@@ -415,12 +420,13 @@ def _build_batch_prompt_texts_from_gt(
                     and float(valid_mask[bi, pi].item()) >= 0.5
                 )
                 if not keep_class_prompt:
-                    per.append(build_background_prompt_text(plane=str(p)))
+                    per.append(build_background_prompt_text(plane=str(p), prompt_mode=prompt_mode))
                     continue
             per.append(
                 build_prompt_text_from_view(
                     plane=str(p),
                     spec=spec,
+                    prompt_mode=prompt_mode,
                     include_present_absent_context=True,
                 )
             )
@@ -583,7 +589,7 @@ def unpermute_outputs(outputs: List[torch.Tensor] | torch.Tensor, perm: torch.Te
 def train_one_epoch(
     *,
     model: P2Echo,
-    text_backbone: FrozenTextBackbone,
+    text_backbone: FrozenTextBackbone | None,
     loader,
     prompt_specs: Sequence[PromptSpec],
     loss_fn,
@@ -601,6 +607,8 @@ def train_one_epoch(
     use_categorical_targets: bool = False,
     use_all_prompts: bool = False,
     keep_class_prompts_for_inactive_valid_labels: bool = False,
+    prompt_mode: str = "view_structure_anatomy",
+    disable_text_conditioning: bool = False,
 ) -> float:
     model.train()
     loss_sum = 0.0
@@ -656,21 +664,27 @@ def train_one_epoch(
             targets = make_binary_targets(gt_mask=gt, prompt_specs=prompt_specs)
 
         # Build text embeddings (prompt_mask controls "segment X" vs "don't segment")
-        text_emb = build_text_embeddings(
-            text_backbone=text_backbone,
-            planes=planes,
-            gt_mask=gt,
-            prompt_specs=prompt_specs,
-            device=device,
-            prompt_mask=prompt_mask if use_categorical_targets else None,
-            valid_mask=valid_mask if use_categorical_targets else None,
-            keep_class_prompts_for_inactive_valid_labels=(
-                keep_class_prompts_for_inactive_valid_labels and use_categorical_targets
-            ),
-        )
+        if disable_text_conditioning:
+            text_emb = None
+        else:
+            if text_backbone is None:
+                raise RuntimeError("text_backbone is None but disable_text_conditioning=False")
+            text_emb = build_text_embeddings(
+                text_backbone=text_backbone,
+                planes=planes,
+                gt_mask=gt,
+                prompt_specs=prompt_specs,
+                device=device,
+                prompt_mode=prompt_mode,
+                prompt_mask=prompt_mask if use_categorical_targets else None,
+                valid_mask=valid_mask if use_categorical_targets else None,
+                keep_class_prompts_for_inactive_valid_labels=(
+                    keep_class_prompts_for_inactive_valid_labels and use_categorical_targets
+                ),
+            )
 
         # Prompt permutation (if enabled) — only for binary targets
-        if permute_prompts and not use_categorical_targets:
+        if permute_prompts and (text_emb is not None) and not use_categorical_targets:
             perm = build_random_prompt_permutation(batch_size=b, num_prompts=n, device=device)
             text_emb = apply_prompt_permutation(text_emb, perm)
             # Permute targets and valid_mask too
@@ -729,7 +743,7 @@ def train_one_epoch(
 def validate(
     *,
     model: P2Echo,
-    text_backbone: FrozenTextBackbone,
+    text_backbone: FrozenTextBackbone | None,
     loader,
     prompt_specs: Sequence[PromptSpec],
     device: torch.device,
@@ -739,6 +753,8 @@ def validate(
     suppress_predictions_for_classes_absent_in_ground_truth: bool = False,
     threshold: float = 0.5,
     max_qual_per_dataset: int = 3,
+    prompt_mode: str = "view_structure_anatomy",
+    disable_text_conditioning: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[str, List[Dict[str, Any]]]]:
     if not MEDPY_AVAILABLE:
         raise RuntimeError("medpy is required for validation metrics. Install medpy or disable medpy-style metrics.")
@@ -759,13 +775,19 @@ def validate(
         n = len(prompt_specs)
 
         # Build text embeddings
-        text_emb = build_text_embeddings(
-            text_backbone=text_backbone,
-            planes=planes,
-            gt_mask=gt,
-            prompt_specs=prompt_specs,
-            device=device,
-        )
+        if disable_text_conditioning:
+            text_emb = None
+        else:
+            if text_backbone is None:
+                raise RuntimeError("text_backbone is None but disable_text_conditioning=False")
+            text_emb = build_text_embeddings(
+                text_backbone=text_backbone,
+                planes=planes,
+                gt_mask=gt,
+                prompt_specs=prompt_specs,
+                device=device,
+                prompt_mode=prompt_mode,
+            )
 
         # Forward
         if use_amp:
@@ -884,6 +906,46 @@ def main():
     )
     parser.add_argument("--ita_dual_injection", action="store_true",
                         help="DyITA: also apply post-hoc text injection after ITABlock (ablation)")
+    parser.add_argument(
+        "--ita_disable_dynamic_projection",
+        action="store_true",
+        help="DyITA ablation: disable dynamic projector routing (use single static Q'/K' projectors).",
+    )
+    parser.add_argument(
+        "--ita_disable_dynamic_kernel",
+        action="store_true",
+        help="DyITA ablation: disable dynamic measure kernels (identity).",
+    )
+    parser.add_argument(
+        "--ita_disable_token_differential",
+        action="store_true",
+        help="DyITA ablation: disable token differential operator (lambda=0 identity behavior).",
+    )
+    parser.add_argument(
+        "--num_decoder_mask_fusions",
+        type=int,
+        default=None,
+        help=(
+            "Ablation: keep only the last K decoder-stage mask embedding fusions "
+            "(K in {1,2,3}; baseline/full corresponds to 3). "
+            "For ita_nocfa, this applies to dec3/dec2/dec1 and keeps bottleneck dec4 fusion enabled."
+        ),
+    )
+    parser.add_argument(
+        "--disable_text_conditioning",
+        action="store_true",
+        help=(
+            "Ablation: disable text conditioning entirely (no text encoder, no cross-attention "
+            "transformer, and zero mask-embedding injections in the decoder)."
+        ),
+    )
+    parser.add_argument(
+        "--prompt_mode",
+        type=str,
+        default="view_structure_anatomy",
+        choices=list(PROMPT_MODES),
+        help="Prompt template mode for ablation: view_only | view_structure | view_structure_anatomy.",
+    )
     
     # Training
     parser.add_argument("--epochs", type=int, default=200)
@@ -928,6 +990,7 @@ def main():
     parser.add_argument("--resume", type=str, default=None)
     
     args = parser.parse_args()
+    args.prompt_mode = normalize_prompt_mode(args.prompt_mode)
     
     # Setup
     set_seed(args.seed)
@@ -964,15 +1027,43 @@ def main():
     # Prompt specs
     prompt_specs = default_prompt_specs()
     _log(f"[{_now()}] Using {len(prompt_specs)} prompt specs", log_path)
-    
+    _log(f"[{_now()}] Prompt mode: {args.prompt_mode}", log_path)
+    if args.disable_text_conditioning:
+        if not args.use_all_prompts:
+            _log(
+                f"[{_now()}] No-text ablation: forcing --use_all_prompts (prompt sampling disabled).",
+                log_path,
+            )
+            args.use_all_prompts = True
+        if args.permute_prompts:
+            _log(
+                f"[{_now()}] No-text ablation: disabling prompt permutation (no text prompts to permute).",
+                log_path,
+            )
+            args.permute_prompts = False
+    if args.num_decoder_mask_fusions is not None:
+        _log(
+            f"[{_now()}] Mask-fusion ablation: num_decoder_mask_fusions={args.num_decoder_mask_fusions}",
+            log_path,
+        )
+    if args.disable_text_conditioning:
+        _log(f"[{_now()}] Text-conditioning ablation: DISABLED (pure segmentation mode)", log_path)
+
     # Text backbone - resolve to local snapshot if offline
-    resolved_text_model = resolve_hf_local_snapshot(args.text_model)
-    _log(f"[{_now()}] Loading text backbone: {resolved_text_model}", log_path)
-    text_backbone = FrozenTextBackbone(
-        model_name=resolved_text_model,
-    )
-    text_backbone.to(device)
-    
+    text_backbone: FrozenTextBackbone | None = None
+    if args.disable_text_conditioning:
+        resolved_text_model = None
+        text_embedding_dim = 1024  # kept only for constructor compatibility; unused in no-text mode
+        _log(f"[{_now()}] Text backbone disabled by ablation flag", log_path)
+    else:
+        resolved_text_model = resolve_hf_local_snapshot(args.text_model)
+        _log(f"[{_now()}] Loading text backbone: {resolved_text_model}", log_path)
+        text_backbone = FrozenTextBackbone(
+            model_name=resolved_text_model,
+        )
+        text_backbone.to(device)
+        text_embedding_dim = text_backbone.embedding_dim
+
     # Model
     _log(f"[{_now()}] Building P2Echo model...", log_path)
     num_classes = len(prompt_specs)
@@ -982,11 +1073,16 @@ def main():
         encoder_name="pvt_v2_b2",
         pretrained_encoder=args.pretrained_encoder,
         pretrained_dir=args.pretrained_dir,
-        text_embedding_dim=text_backbone.embedding_dim,
+        text_embedding_dim=text_embedding_dim,
         num_classes=num_classes,
         deep_supervision=True,
         decoder_type=args.decoder_type,
         ita_dual_injection=args.ita_dual_injection,
+        ita_disable_dynamic_projection=args.ita_disable_dynamic_projection,
+        ita_disable_dynamic_kernel=args.ita_disable_dynamic_kernel,
+        ita_disable_token_differential=args.ita_disable_token_differential,
+        num_decoder_mask_fusions=args.num_decoder_mask_fusions,
+        disable_text_conditioning=args.disable_text_conditioning,
     )
     model = model.to(device)
     
@@ -1074,6 +1170,8 @@ def main():
             use_categorical_targets=(args.loss_type == "dice_ce"),
             use_all_prompts=args.use_all_prompts,
             keep_class_prompts_for_inactive_valid_labels=args.keep_class_prompts_for_inactive_valid_labels,
+            prompt_mode=args.prompt_mode,
+            disable_text_conditioning=args.disable_text_conditioning,
         )
         _log(f"[{_now()}] Train loss: {train_loss:.4f}", log_path)
         # Note: scheduler.step() is now called per-iteration inside train_one_epoch
@@ -1092,6 +1190,8 @@ def main():
                 suppress_predictions_for_classes_absent_in_ground_truth=(
                     args.suppress_predictions_for_classes_absent_in_ground_truth
                 ),
+                prompt_mode=args.prompt_mode,
+                disable_text_conditioning=args.disable_text_conditioning,
             )
 
             mean_metrics = metrics.get("mean_metrics", {})

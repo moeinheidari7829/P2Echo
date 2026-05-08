@@ -40,6 +40,29 @@ ID_TO_LONG: Dict[int, str] = {
 NUM_CLASSES: int = len(LABEL_TO_ID)
 
 
+PROMPT_MODES: Tuple[str, ...] = (
+    "view_only",
+    "view_structure",
+    "view_structure_anatomy",
+)
+
+
+def normalize_prompt_mode(mode: str) -> str:
+    m = str(mode).strip().lower()
+    aliases = {
+        "full": "view_structure_anatomy",
+        "view+structure+anatomy": "view_structure_anatomy",
+        "view_structure_anat": "view_structure_anatomy",
+        "view+structure": "view_structure",
+        "view_structure_only": "view_structure",
+        "view": "view_only",
+    }
+    m = aliases.get(m, m)
+    if m not in PROMPT_MODES:
+        raise ValueError(f"Invalid prompt_mode={mode!r}. Choose from {PROMPT_MODES}.")
+    return m
+
+
 # =============================================================================
 # View/Dataset structure mappings
 # =============================================================================
@@ -176,11 +199,16 @@ def default_prompt_specs(include_lv_myo_combo: bool = False) -> List[PromptSpec]
 # Prompt text generation
 # =============================================================================
 
-def build_background_prompt_text(*, plane: str) -> str:
+def build_background_prompt_text(*, plane: str, prompt_mode: str = "view_structure_anatomy") -> str:
     """Build prompt text for background-only segmentation."""
+    prompt_mode = normalize_prompt_mode(prompt_mode)
     plane_text = plane_to_text_with_abbrev(plane)
     present = set(view_label_set(plane))
     present_text = ", ".join(sorted(present)) if len(present) else "none"
+    if prompt_mode == "view_only":
+        return f"{plane_text}."
+    if prompt_mode == "view_structure":
+        return f"{plane_text}: background."
     return f"{plane_text}: Structures visualized: {present_text}. Segment background only."
 
 
@@ -189,6 +217,7 @@ def build_prompt_text(
     plane: str,
     dataset: str,
     spec: PromptSpec,
+    prompt_mode: str = "view_structure_anatomy",
     include_present_absent_context: bool = True,
 ) -> str:
     """
@@ -203,11 +232,16 @@ def build_prompt_text(
     Returns:
         Formatted prompt text string
     """
+    prompt_mode = normalize_prompt_mode(prompt_mode)
     plane_text = plane_to_text_with_abbrev(plane)
     present = set(view_label_set(plane))
     present_text = ", ".join(sorted(present)) if len(present) else "none"
 
     if spec.user_prompt is not None:
+        if prompt_mode == "view_only":
+            return f"{plane_text}."
+        if prompt_mode == "view_structure":
+            return f"{plane_text}. {spec.user_prompt}"
         if include_present_absent_context:
             return (
                 f"{plane_text}. Structures present: {present_text}. "
@@ -221,10 +255,9 @@ def build_prompt_text(
         raise ValueError("PromptSpec.label_ids must be non-empty unless user_prompt is provided.")
 
     if all(lid == 0 for lid in label_ids):
-        instr = "Segment background only."
-        if include_present_absent_context:
-            return f"{plane_text}: Structures visualized: {present_text}. {instr}"
-        return f"{plane_text}: {instr}"
+        return build_background_prompt_text(
+            plane=plane, prompt_mode=prompt_mode
+        )
 
     labels_short = []
     labels_long = []
@@ -236,6 +269,14 @@ def build_prompt_text(
         labels_long.append(ID_TO_LONG.get(lid, short))
 
     requested = list(labels_short)
+    if prompt_mode == "view_only":
+        return f"{plane_text}."
+    if prompt_mode == "view_structure":
+        if len(labels_short) == 1:
+            return f"{plane_text}: Segment the {labels_short[0]}."
+        joined_short = " and ".join(labels_short)
+        return f"{plane_text}: Segment the {joined_short}."
+
     requested_present = [s for s in requested if s in present]
     requested_absent = [s for s in requested if s not in present]
 
@@ -278,6 +319,7 @@ def build_prompt_text_from_view(
     *,
     plane: str,
     spec: PromptSpec,
+    prompt_mode: str = "view_structure_anatomy",
     include_present_absent_context: bool = True,
 ) -> str:
     """Build prompt text using view-based visible structures."""
@@ -285,6 +327,7 @@ def build_prompt_text_from_view(
         plane=str(plane),
         dataset="",
         spec=spec,
+        prompt_mode=prompt_mode,
         include_present_absent_context=include_present_absent_context,
     )
 
@@ -294,6 +337,7 @@ def build_batch_prompt_texts(
     planes: Sequence[str],
     datasets: Sequence[str],
     prompt_specs: Sequence[PromptSpec],
+    prompt_mode: str = "view_structure_anatomy",
     include_present_absent_context: bool = True,
 ) -> List[List[str]]:
     """
@@ -311,6 +355,7 @@ def build_batch_prompt_texts(
                 plane=str(p),
                 dataset=str(ds),
                 spec=spec,
+                prompt_mode=prompt_mode,
                 include_present_absent_context=include_present_absent_context,
             )
             for spec in prompt_specs

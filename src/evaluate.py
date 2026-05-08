@@ -1,7 +1,7 @@
 """
 Evaluation script for P2Echo-new.
 
-Evaluates the best checkpoint on the external split (EchoNet-Dynamic and HMCQU).
+Evaluates a checkpoint on the selected split ("test" or "external").
 Produces per-dataset metrics (Dice, IoU, HD95, ASSD) and qualitative figures.
 
 Usage:
@@ -9,13 +9,15 @@ Usage:
         --checkpoint ./outputs/p2echo_v2_small_transformer_boundary_loss/checkpoints/best.pth \
         --splits_json /project/def-ilkerh/moeinh78/data/data_splits.json \
         --data_root /project/def-ilkerh/moeinh78/data \
+        --split test \
         --text_model Qwen/Qwen3-Embedding-0.6B \
-        --output_dir ./outputs/eval_external
+        --output_dir ./outputs/eval_test
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import time
 from collections import defaultdict
@@ -41,10 +43,12 @@ from metrics import MEDPY_AVAILABLE, MetricAggregator
 from prompts import (
     LABEL_TO_ID,
     ID_TO_LABEL,
+    PROMPT_MODES,
     PromptSpec,
     build_prompt_text_from_view,
     build_background_prompt_text,
     default_prompt_specs,
+    normalize_prompt_mode,
     present_label_set,
     view_label_set,
 )
@@ -128,6 +132,7 @@ def build_text_embeddings(
     planes: Sequence[str],
     prompt_specs: Sequence[PromptSpec],
     device: torch.device,
+    prompt_mode: str = "view_structure_anatomy",
 ) -> torch.Tensor:
     """Build text embeddings for a batch. Returns [B, N, D]."""
     prompt_texts: List[List[str]] = []
@@ -138,6 +143,7 @@ def build_text_embeddings(
                 build_prompt_text_from_view(
                     plane=str(plane),
                     spec=spec,
+                    prompt_mode=prompt_mode,
                     include_present_absent_context=True,
                 )
             )
@@ -314,7 +320,7 @@ def save_qualitative_grid(
 def evaluate(
     *,
     model: P2Echo,
-    text_backbone: FrozenTextBackbone,
+    text_backbone: FrozenTextBackbone | None,
     loader,
     prompt_specs: Sequence[PromptSpec],
     device: torch.device,
@@ -326,6 +332,10 @@ def evaluate(
     max_qual_per_dataset: int = 10,
     output_dir: Path,
     log_path: Optional[Path] = None,
+    prompt_mode: str = "view_structure_anatomy",
+    disable_text_conditioning: bool = False,
+    save_per_sample_metrics: bool = False,
+    per_sample_metrics_name: str = "per_sample_metrics.csv",
 ) -> Dict[str, Any]:
     """Run evaluation on a dataloader and save metrics + qualitative figures."""
     if not MEDPY_AVAILABLE:
@@ -334,6 +344,7 @@ def evaluate(
     model.eval()
     agg = MetricAggregator()
     qual_examples: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    per_sample_rows: List[Dict[str, Any]] = []
 
     n_batches = 0
     for batch in loader:
@@ -345,13 +356,19 @@ def evaluate(
 
         b = img.shape[0]
 
-        # Build text embeddings
-        text_emb = build_text_embeddings(
-            text_backbone=text_backbone,
-            planes=planes,
-            prompt_specs=prompt_specs,
-            device=device,
-        )
+        # Build text embeddings (or skip in no-text ablation mode)
+        if disable_text_conditioning:
+            text_emb = None
+        else:
+            if text_backbone is None:
+                raise RuntimeError("text_backbone is None but disable_text_conditioning=False")
+            text_emb = build_text_embeddings(
+                text_backbone=text_backbone,
+                planes=planes,
+                prompt_specs=prompt_specs,
+                device=device,
+                prompt_mode=prompt_mode,
+            )
 
         # Forward
         if use_amp:
@@ -404,13 +421,39 @@ def evaluate(
                 )
 
             if valid_labels:
-                agg.update(
+                case_metrics = agg.update(
                     pred_mc,
                     gt_np[i],
                     view=view,
                     dataset=ds,
                     class_ids=valid_labels,
                 )
+                if save_per_sample_metrics:
+                    # Sample-level macro metrics over evaluated (valid) classes.
+                    metric_vals = defaultdict(list)
+                    for class_name, m in case_metrics.items():
+                        for mk, mv in m.items():
+                            if np.isfinite(mv):
+                                metric_vals[mk].append(float(mv))
+                    row = {
+                        "sample_index": len(per_sample_rows),
+                        "dataset": ds,
+                        "view": view,
+                        "stem": str(stems[i]) if stems else "",
+                        "n_valid_classes": len(valid_labels),
+                        "valid_class_ids": "|".join(str(int(x)) for x in valid_labels),
+                        "sample_mean_dice": float(np.mean(metric_vals["dice"])) if metric_vals["dice"] else float("nan"),
+                        "sample_mean_iou": float(np.mean(metric_vals["iou"])) if metric_vals["iou"] else float("nan"),
+                        "sample_mean_hd95": float(np.mean(metric_vals["hd95"])) if metric_vals["hd95"] else float("nan"),
+                        "sample_mean_assd": float(np.mean(metric_vals["assd"])) if metric_vals["assd"] else float("nan"),
+                    }
+                    # Per-class dice columns (always fixed anatomical set), NaN if class not evaluated.
+                    for cls_name in ("LV", "MYO", "LA", "RV", "RA"):
+                        row[f"dice_{cls_name}"] = float(case_metrics[cls_name]["dice"]) if cls_name in case_metrics else float("nan")
+                        row[f"iou_{cls_name}"] = float(case_metrics[cls_name]["iou"]) if cls_name in case_metrics else float("nan")
+                        row[f"hd95_{cls_name}"] = float(case_metrics[cls_name]["hd95"]) if cls_name in case_metrics else float("nan")
+                        row[f"assd_{cls_name}"] = float(case_metrics[cls_name]["assd"]) if cls_name in case_metrics else float("nan")
+                    per_sample_rows.append(row)
 
             # Collect qualitative examples
             if len(qual_examples[ds]) < max_qual_per_dataset:
@@ -450,6 +493,25 @@ def evaluate(
     # Compute and log metrics
     # =========================================================================
     metrics = agg.to_dict()
+
+    # Optional per-sample CSV export for downstream statistics (e.g., std across samples).
+    if save_per_sample_metrics:
+        per_sample_path = output_dir / per_sample_metrics_name
+        _mkdir(per_sample_path.parent)
+        fieldnames = [
+            "sample_index", "dataset", "view", "stem",
+            "n_valid_classes", "valid_class_ids",
+            "sample_mean_dice", "sample_mean_iou", "sample_mean_hd95", "sample_mean_assd",
+        ]
+        for prefix in ("dice", "iou", "hd95", "assd"):
+            for cls_name in ("LV", "MYO", "LA", "RV", "RA"):
+                fieldnames.append(f"{prefix}_{cls_name}")
+        with per_sample_path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in per_sample_rows:
+                writer.writerow(row)
+        _log(f"[{_now()}] Per-sample metrics CSV: {per_sample_path}  (rows={len(per_sample_rows)})", log_path)
 
     _log(f"\n{'='*80}", log_path)
     _log(f"EVALUATION RESULTS  ({metrics['n_samples']} samples)", log_path)
@@ -545,18 +607,31 @@ def _format_summary_table(
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate P2Echo-new on external data")
+    parser = argparse.ArgumentParser(description="Evaluate P2Echo-new on a selected data split")
 
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Path to model checkpoint (.pth)")
     parser.add_argument("--splits_json", type=str, required=True,
                         help="Path to data_splits.json")
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="external",
+        choices=["test", "external"],
+        help="Which split from data_splits.json to evaluate.",
+    )
     parser.add_argument("--data_root", type=str, default="",
                         help="Root directory for data paths")
     parser.add_argument("--text_model", type=str, default="Qwen/Qwen3-Embedding-0.6B",
                         help="Text encoder model name or path")
     parser.add_argument("--output_dir", type=str, default="./outputs/eval_external",
                         help="Directory to save evaluation results")
+    parser.add_argument(
+        "--datasets",
+        nargs="*",
+        default=None,
+        help="Optional dataset name filter(s) within the selected split, e.g. HMCQU CardiacNet.",
+    )
     parser.add_argument("--image_size", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_workers", type=int, default=4)
@@ -573,6 +648,46 @@ def main():
     )
     parser.add_argument("--ita_dual_injection", action="store_true",
                         help="For decoder_type in {ita, ita_nocfa}: enable post-hoc text injection after ITABlock.")
+    parser.add_argument(
+        "--ita_disable_dynamic_projection",
+        action="store_true",
+        help="DyITA ablation: disable dynamic projector routing (use single static Q'/K' projectors).",
+    )
+    parser.add_argument(
+        "--ita_disable_dynamic_kernel",
+        action="store_true",
+        help="DyITA ablation: disable dynamic measure kernels (identity).",
+    )
+    parser.add_argument(
+        "--ita_disable_token_differential",
+        action="store_true",
+        help="DyITA ablation: disable token differential operator (lambda=0 identity behavior).",
+    )
+    parser.add_argument(
+        "--num_decoder_mask_fusions",
+        type=int,
+        default=None,
+        help=(
+            "Ablation: keep only the last K decoder-stage mask embedding fusions "
+            "(K in {1,2,3}; baseline/full corresponds to 3). "
+            "For ita_nocfa, this applies to dec3/dec2/dec1 and keeps bottleneck dec4 fusion enabled."
+        ),
+    )
+    parser.add_argument(
+        "--disable_text_conditioning",
+        action="store_true",
+        help=(
+            "Ablation: disable text conditioning entirely (no text encoder, no cross-attention "
+            "transformer, and zero mask-embedding injections in the decoder)."
+        ),
+    )
+    parser.add_argument(
+        "--prompt_mode",
+        type=str,
+        default="view_structure_anatomy",
+        choices=list(PROMPT_MODES),
+        help="Prompt template mode for ablation: view_only | view_structure | view_structure_anatomy.",
+    )
     parser.add_argument("--logits_mode", type=str, default="sigmoid", choices=["sigmoid", "softmax"],
                         help="How to decode logits: sigmoid-threshold (binary prompts) or softmax-argmax (multiclass).")
     parser.add_argument("--use_amp", action="store_true")
@@ -590,9 +705,21 @@ def main():
         ),
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--save_per_sample_metrics",
+        action="store_true",
+        help="Save per-sample metrics CSV (sample macro metrics + per-class metrics) for downstream statistics.",
+    )
+    parser.add_argument(
+        "--per_sample_metrics_name",
+        type=str,
+        default="per_sample_metrics.csv",
+        help="Filename for the optional per-sample metrics CSV inside output_dir.",
+    )
 
     args = parser.parse_args()
 
+    args.prompt_mode = normalize_prompt_mode(args.prompt_mode)
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -600,29 +727,53 @@ def main():
     _mkdir(output_dir)
     log_path = output_dir / "eval_log.txt"
 
-    _log(f"[{_now()}] P2Echo-new External Evaluation", log_path)
+    _log(f"[{_now()}] P2Echo-new Evaluation", log_path)
     _log(f"[{_now()}] Checkpoint: {args.checkpoint}", log_path)
     _log(f"[{_now()}] Args: {args}", log_path)
 
     # =========================================================================
-    # Load data (external split only)
+    # Load data (selected split)
     # =========================================================================
-    _log(f"\n[{_now()}] Loading external data split...", log_path)
-    _, _, _, external_df = load_splits_json(args.splits_json, data_root=args.data_root)
+    _log(f"\n[{_now()}] Loading '{args.split}' data split...", log_path)
+    _, _, test_df, external_df = load_splits_json(args.splits_json, data_root=args.data_root)
+    if args.split == "test":
+        split_df = test_df
+    else:
+        split_df = external_df
 
-    if external_df is None or len(external_df) == 0:
-        _log("[ERROR] No external data found in the splits JSON!", log_path)
+    if split_df is None or len(split_df) == 0:
+        _log(f"[ERROR] No data found for split='{args.split}' in the splits JSON!", log_path)
         return
 
+    if args.datasets:
+        requested = [str(x) for x in args.datasets if str(x).strip()]
+        available = set(split_df["dataset"].astype(str).unique().tolist())
+        missing = [d for d in requested if d not in available]
+        if missing:
+            _log(
+                f"[WARNING] Requested datasets not found in split '{args.split}': {missing}. "
+                f"Available: {sorted(available)}",
+                log_path,
+            )
+        keep = [d for d in requested if d in available]
+        if not keep:
+            _log(
+                f"[ERROR] After dataset filtering, no samples remain for split='{args.split}'.",
+                log_path,
+            )
+            return
+        split_df = split_df[split_df["dataset"].astype(str).isin(keep)].reset_index(drop=True)
+        _log(f"[{_now()}] Dataset filter applied: {keep}", log_path)
+
     # Show dataset distribution
-    ds_counts = external_df["dataset"].value_counts()
-    _log(f"[{_now()}] External split: {len(external_df)} total samples", log_path)
+    ds_counts = split_df["dataset"].value_counts()
+    _log(f"[{_now()}] Split '{args.split}': {len(split_df)} total samples", log_path)
     for ds_name, count in ds_counts.items():
         _log(f"  {ds_name}: {count} samples", log_path)
 
-    external_loader = torch.utils.data.DataLoader(
+    eval_loader = torch.utils.data.DataLoader(
         MultiTaskEchoDataset(
-            external_df,
+            split_df,
             resize=(args.image_size, args.image_size),
             to_rgb=True,
             image_transform=normalize_image,
@@ -645,12 +796,18 @@ def main():
         _log(f"  [{i}] labels={label_names}", log_path)
 
     # =========================================================================
-    # Text backbone
+    # Text backbone (optional for no-text ablation)
     # =========================================================================
-    resolved_text_model = resolve_hf_local_snapshot(args.text_model)
-    _log(f"[{_now()}] Loading text backbone: {resolved_text_model}", log_path)
-    text_backbone = FrozenTextBackbone(model_name=resolved_text_model)
-    text_backbone.to(device)
+    text_backbone: FrozenTextBackbone | None = None
+    if args.disable_text_conditioning:
+        text_embedding_dim = 1024  # constructor compatibility; unused in no-text mode
+        _log(f"[{_now()}] Text backbone disabled by ablation flag", log_path)
+    else:
+        resolved_text_model = resolve_hf_local_snapshot(args.text_model)
+        _log(f"[{_now()}] Loading text backbone: {resolved_text_model}", log_path)
+        text_backbone = FrozenTextBackbone(model_name=resolved_text_model)
+        text_backbone.to(device)
+        text_embedding_dim = text_backbone.embedding_dim
 
     # =========================================================================
     # Model
@@ -672,6 +829,16 @@ def main():
         f"ita_dual_injection={ita_dual_injection}",
         log_path,
     )
+    _log(
+        f"[{_now()}] DyITA ablation flags: "
+        f"disable_dynamic_projection={args.ita_disable_dynamic_projection}, "
+        f"disable_dynamic_kernel={args.ita_disable_dynamic_kernel}, "
+        f"disable_token_differential={args.ita_disable_token_differential}, "
+        f"num_decoder_mask_fusions={args.num_decoder_mask_fusions}, "
+        f"disable_text_conditioning={args.disable_text_conditioning}",
+        log_path,
+    )
+    _log(f"[{_now()}] Prompt mode: {args.prompt_mode}", log_path)
     _log(f"[{_now()}] Logits decode mode: {args.logits_mode}", log_path)
     _log(
         f"[{_now()}] Suppress GT-absent predicted classes: "
@@ -685,11 +852,16 @@ def main():
         encoder_name="pvt_v2_b2",
         pretrained_encoder=False,  # loading from checkpoint
         pretrained_dir=args.pretrained_dir,
-        text_embedding_dim=text_backbone.embedding_dim,
+        text_embedding_dim=text_embedding_dim,
         num_classes=num_classes,
         deep_supervision=True,
         decoder_type=decoder_type,
         ita_dual_injection=ita_dual_injection,
+        ita_disable_dynamic_projection=args.ita_disable_dynamic_projection,
+        ita_disable_dynamic_kernel=args.ita_disable_dynamic_kernel,
+        ita_disable_token_differential=args.ita_disable_token_differential,
+        num_decoder_mask_fusions=args.num_decoder_mask_fusions,
+        disable_text_conditioning=args.disable_text_conditioning,
     )
 
     # Load checkpoint weights
@@ -708,11 +880,11 @@ def main():
     # =========================================================================
     amp_dtype = torch.bfloat16 if args.bf16 else torch.float16
 
-    _log(f"\n[{_now()}] Starting evaluation on external split...", log_path)
+    _log(f"\n[{_now()}] Starting evaluation on split='{args.split}'...", log_path)
     metrics = evaluate(
         model=model,
         text_backbone=text_backbone,
-        loader=external_loader,
+        loader=eval_loader,
         prompt_specs=prompt_specs,
         device=device,
         use_amp=args.use_amp,
@@ -725,6 +897,10 @@ def main():
         max_qual_per_dataset=args.max_qual,
         output_dir=output_dir,
         log_path=log_path,
+        prompt_mode=args.prompt_mode,
+        disable_text_conditioning=args.disable_text_conditioning,
+        save_per_sample_metrics=args.save_per_sample_metrics,
+        per_sample_metrics_name=args.per_sample_metrics_name,
     )
 
     _log(f"\n[{_now()}] Evaluation complete. Results saved to: {output_dir}", log_path)

@@ -79,6 +79,9 @@ class DyITADecoder(nn.Module):
         lambda_init: float = 0.01,
         # Ablation / supervision flags
         dual_injection: bool = False,
+        disable_dynamic_projection: bool = False,
+        disable_dynamic_kernel: bool = False,
+        disable_token_differential: bool = False,
         deep_supervision: bool = True,
         writer=None,
     ):
@@ -139,6 +142,9 @@ class DyITADecoder(nn.Module):
             n_diff_factors=n_diff_factors,
             gamma_init=gamma_init,
             lambda_init=lambda_init,
+            disable_dynamic_projection=disable_dynamic_projection,
+            disable_dynamic_kernel=disable_dynamic_kernel,
+            disable_token_differential=disable_token_differential,
         )
         self.dec3 = ita_factory(embed_dim=channels[1], n_heads=n_heads[0])
         self.dec2 = ita_factory(embed_dim=channels[2], n_heads=n_heads[1])
@@ -280,6 +286,9 @@ class DyITADecoderNoCFA(DyITADecoder):
         gamma_init: float = 3.0,
         lambda_init: float = 0.01,
         dual_injection: bool = False,
+        disable_dynamic_projection: bool = False,
+        disable_dynamic_kernel: bool = False,
+        disable_token_differential: bool = False,
         deep_supervision: bool = True,
         bottleneck_n_heads: int = 2,
         writer=None,
@@ -297,6 +306,9 @@ class DyITADecoderNoCFA(DyITADecoder):
             gamma_init=gamma_init,
             lambda_init=lambda_init,
             dual_injection=dual_injection,
+            disable_dynamic_projection=disable_dynamic_projection,
+            disable_dynamic_kernel=disable_dynamic_kernel,
+            disable_token_differential=disable_token_differential,
             deep_supervision=deep_supervision,
             writer=writer,
         )
@@ -314,6 +326,9 @@ class DyITADecoderNoCFA(DyITADecoder):
             n_diff_factors=n_diff_factors,
             gamma_init=gamma_init,
             lambda_init=lambda_init,
+            disable_dynamic_projection=disable_dynamic_projection,
+            disable_dynamic_kernel=disable_dynamic_kernel,
+            disable_token_differential=disable_token_differential,
         )
 
     def forward(
