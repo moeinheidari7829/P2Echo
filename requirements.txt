@@ -1,0 +1,8 @@
+torch>=2.1
+timm>=0.9
+transformers>=4.51
+numpy<2
+pillow
+medpy
+batchgenerators
+thop
