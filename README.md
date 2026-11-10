@@ -21,7 +21,7 @@
   Each output map follows its prompt; unrelated or empty requests return an empty mask.
 - **🔀 DyITA.** Dynamic Image-Text Alignment fuses the prompt into every decoder stage through dynamic projection,
   a dynamic measure kernel and a cross-modal differential operator.
-- **⚡ Light and fast.** 37.5 M trainable parameters, 6.64 GMACs, 64 FPS on one H100 (frozen Qwen3-Embedding-0.6B
+- **⚡ Light and fast.** 37.47 M parameters, 6.90 GFLOPs and 64.68 FPS on one H100 (frozen Qwen3-Embedding-0.6B
   text encoder; prompt embeddings are cached).
 
 <p align="center">
@@ -48,10 +48,10 @@
     <tr><td>nnUNet</td><td>92.82</td><td>93.07</td><td>91.39</td><td>91.50</td><td>45.30</td><td>88.13</td></tr>
     <tr><td>SAM3 (fine-tuned)</td><td>93.39</td><td>92.70</td><td>90.85</td><td>91.18</td><td>43.46</td><td>90.62</td></tr>
     <tr><td>EchoONE</td><td>91.69</td><td>93.60</td><td>91.11</td><td>91.71</td><td>53.96</td><td>88.10</td></tr>
-    <tr><td><b>P2Echo (ours)</b></td><td><b>97.46</b></td><td><b>95.05</b></td><td><b>94.45</b></td><td><b>91.99</b></td><td><b>82.00</b></td><td><b>92.66</b></td></tr>
+    <tr><td><b>P2Echo (ours)</b></td><td><b>96.94</b></td><td><b>94.71</b></td><td><b>93.87</b></td><td><b>92.00</b></td><td><b>82.22</b></td><td><b>92.95</b></td></tr>
   </tbody>
 </table>
-<sub>P2Echo numbers are reproduced exactly by the released checkpoint with the commands below.</sub>
+<sub>mDice reported in the paper (Tables III and IV).</sub>
 </div>
 
 ## Installation
