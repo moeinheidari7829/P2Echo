@@ -1,27 +1,58 @@
-# Prompt2Echo (P2Echo): Text-Prompted Multi-View Echocardiography Segmentation with One Model
+<h1 align="center">Prompt2Echo (P2Echo)</h1>
+<h3 align="center">Text-Prompted Multi-View Echocardiography Segmentation with One Model</h3>
 
-[![arXiv](https://img.shields.io/badge/arXiv-ARXIV_ID_PLACEHOLDER-b31b1b.svg)](https://arxiv.org/abs/ARXIV_ID_PLACEHOLDER)
-[![Project Page](https://img.shields.io/badge/Project-Page-blue.svg)](https://PROJECT_PAGE_PLACEHOLDER)
+<p align="center">
+  <a href="https://arxiv.org/abs/ARXIV_ID_PLACEHOLDER"><img src="https://img.shields.io/badge/arXiv-ARXIV_ID_PLACEHOLDER-b31b1b.svg" alt="arXiv"></a>
+  <a href="https://PROJECT_PAGE_PLACEHOLDER"><img src="https://img.shields.io/badge/Project-Page-blue.svg" alt="Project Page"></a>
+  <a href="https://drive.google.com/file/d/1wKF_MnWlMcpfYZTurb2wHOobENmhHQuj/view?usp=sharing"><img src="https://img.shields.io/badge/Checkpoint-Google%20Drive-34a853.svg" alt="Checkpoint"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-lightgrey.svg" alt="License"></a>
+</p>
 
-[![P2Echo teaser](assets/teaser.webp)](https://PROJECT_PAGE_PLACEHOLDER)
+<p align="center">
+  <a href="https://PROJECT_PAGE_PLACEHOLDER"><img src="assets/teaser.webp" width="100%" alt="P2Echo teaser"></a>
+</p>
 
-**P2Echo** segments cardiac structures (LV, MYO, LA, RV, RA) in 2CH, 3CH, 4CH and PSAX echocardiography with a
-single network controlled by view-aware text prompts. Prompts are embedded by a frozen Qwen3-Embedding-0.6B
-model, grounded in the image by a prompt decoder, and injected at every decoder stage through the
-Dynamic Image-Text Alignment (DyITA) module. Each output map follows its prompt, so the same image can be queried
-for any of the five structures.
+<p align="center"><b>One network. Four echocardiographic views. Five cardiac structures. Controlled by a text prompt.</b></p>
 
-| mDice (%) ↑ | 2CH | 3CH | 4CH | PSAX | HMC-QU | CardiacNet |
-|---|---|---|---|---|---|---|
-| nnUNet | 92.82 | 93.07 | 91.39 | 91.50 | 45.30 | 88.13 |
-| SAM3 (fine-tuned) | 93.39 | 92.70 | 90.85 | 91.18 | 43.46 | 90.62 |
-| EchoONE | 91.69 | 93.60 | 91.11 | 91.71 | 53.96 | 88.10 |
-| **P2Echo** | **97.46** | **95.05** | **94.45** | **91.99** | **82.00** | **92.66** |
+- **🫀 One model for every view.** A single P2Echo segments LV, MYO, LA, RV and RA in 2CH, 3CH, 4CH and PSAX,
+  replacing a set of view-specific specialists.
+- **💬 Text as the control signal.** A structured prompt names the view and the structure, e.g.
+  *"Apical 4-Chamber (4CH): … Segment the LV: The LV appears as a bullet-shaped chamber forming the apex."*
+  Each output map follows its prompt; unrelated or empty requests return an empty mask.
+- **🔀 DyITA.** Dynamic Image-Text Alignment fuses the prompt into every decoder stage through dynamic projection,
+  a dynamic measure kernel and a cross-modal differential operator.
+- **⚡ Light and fast.** 37.5 M trainable parameters, 6.64 GMACs, 64 FPS on one H100 (frozen Qwen3-Embedding-0.6B
+  text encoder; prompt embeddings are cached).
 
-<sub>Internal test views (left) and held-out external datasets (right). P2Echo numbers are reproduced by the
-released checkpoint with the commands below.</sub>
+<p align="center">
+  <img src="assets/architecture.png" width="100%" alt="P2Echo architecture">
+  <br><sub>A PVTv2-B2 encoder and a frozen text encoder feed a prompt decoder; the resulting stage-specific
+  prompt embeddings are injected into four ITA blocks, each built around DyITA.</sub>
+</p>
 
-![Overview](assets/overview.png)
+## Results
+
+<div align="center">
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2" align="left">mDice (%) ↑</th>
+      <th colspan="4">Internal test set (multi-view)</th>
+      <th colspan="2">External, held-out (4CH)</th>
+    </tr>
+    <tr>
+      <th>2CH</th><th>3CH</th><th>4CH</th><th>PSAX</th><th>HMC-QU</th><th>CardiacNet</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>nnUNet</td><td>92.82</td><td>93.07</td><td>91.39</td><td>91.50</td><td>45.30</td><td>88.13</td></tr>
+    <tr><td>SAM3 (fine-tuned)</td><td>93.39</td><td>92.70</td><td>90.85</td><td>91.18</td><td>43.46</td><td>90.62</td></tr>
+    <tr><td>EchoONE</td><td>91.69</td><td>93.60</td><td>91.11</td><td>91.71</td><td>53.96</td><td>88.10</td></tr>
+    <tr><td><b>P2Echo (ours)</b></td><td><b>97.46</b></td><td><b>95.05</b></td><td><b>94.45</b></td><td><b>91.99</b></td><td><b>82.00</b></td><td><b>92.66</b></td></tr>
+  </tbody>
+</table>
+<sub>P2Echo numbers are reproduced exactly by the released checkpoint with the commands below.</sub>
+</div>
 
 ## Installation
 
