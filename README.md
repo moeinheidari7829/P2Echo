@@ -3,13 +3,13 @@
 
 <p align="center">
   <a href="https://arxiv.org/abs/ARXIV_ID_PLACEHOLDER"><img src="https://img.shields.io/badge/arXiv-ARXIV_ID_PLACEHOLDER-b31b1b.svg" alt="arXiv"></a>
-  <a href="https://PROJECT_PAGE_PLACEHOLDER"><img src="https://img.shields.io/badge/Project-Page-blue.svg" alt="Project Page"></a>
+  <a href="https://moeinheidari7829.github.io/p2echo/"><img src="https://img.shields.io/badge/Project-Page-blue.svg" alt="Project Page"></a>
   <a href="https://drive.google.com/file/d/1wKF_MnWlMcpfYZTurb2wHOobENmhHQuj/view?usp=sharing"><img src="https://img.shields.io/badge/Checkpoint-Google%20Drive-34a853.svg" alt="Checkpoint"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-lightgrey.svg" alt="License"></a>
 </p>
 
 <p align="center">
-  <a href="https://PROJECT_PAGE_PLACEHOLDER"><img src="assets/teaser.webp" width="100%" alt="P2Echo teaser"></a>
+  <a href="https://moeinheidari7829.github.io/p2echo/"><img src="assets/teaser.webp" width="100%" alt="P2Echo teaser"></a>
 </p>
 
 <p align="center"><b>One network. Four echocardiographic views. Five cardiac structures. Controlled by a text prompt.</b></p>
