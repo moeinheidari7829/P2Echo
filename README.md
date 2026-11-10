@@ -21,8 +21,7 @@
   Each output map follows its prompt; unrelated or empty requests return an empty mask.
 - **🔀 DyITA.** Dynamic Image-Text Alignment fuses the prompt into every decoder stage through dynamic projection,
   a dynamic measure kernel and a cross-modal differential operator.
-- **⚡ Light and fast.** 37.47 M parameters, 6.90 GFLOPs and 64.68 FPS on one H100 (frozen Qwen3-Embedding-0.6B
-  text encoder; prompt embeddings are cached).
+- **⚡ Light and fast.** 37.47 M parameters, 6.90 GFLOPs and 64.68 FPS on one H100.
 
 <p align="center">
   <img src="assets/architecture.png" width="100%" alt="P2Echo architecture">
@@ -51,7 +50,6 @@
     <tr><td><b>P2Echo (ours)</b></td><td><b>96.94</b></td><td><b>94.71</b></td><td><b>93.87</b></td><td><b>92.00</b></td><td><b>82.22</b></td><td><b>92.95</b></td></tr>
   </tbody>
 </table>
-<sub>mDice reported in the paper (Tables III and IV).</sub>
 </div>
 
 ## Installation
@@ -109,8 +107,7 @@ The split file is a JSON with `train`, `val`, `test` and `external` lists of
   ```bash
   mkdir -p pretrained && wget -P pretrained https://github.com/whai362/PVT/releases/download/v2/pvt_v2_b2.pth
   ```
-- P2Echo checkpoint: [Google Drive](https://drive.google.com/file/d/1wKF_MnWlMcpfYZTurb2wHOobENmhHQuj/view?usp=sharing). Place it at `checkpoints/p2echo.pth`
-  (SHA-256 `2892bb52eb3011031217332a0614a87aae895e006850ec08187fcd95197fd16a`).
+- P2Echo checkpoint: [Google Drive](https://drive.google.com/file/d/1wKF_MnWlMcpfYZTurb2wHOobENmhHQuj/view?usp=sharing). Place it at `checkpoints/p2echo.pth`.
 
 ## Training
 
@@ -120,7 +117,7 @@ python train.py --splits splits.json --data_root data --output runs/p2echo
 
 Default arguments reproduce the paper setting: 200 epochs, SGD (lr 0.01, momentum 0.9, weight decay 1e-4),
 batch size 32, polynomial decay, BF16 mixed precision, Boundary-DoU loss with deep supervision. The checkpoint
-with the best validation mDice is saved as `runs/p2echo/best.pth`. Training takes about two days on one H100.
+with the best validation mDice is saved as `runs/p2echo/best.pth`.
 
 ## Evaluation
 
@@ -176,6 +173,6 @@ probs = torch.sigmoid(model(image, emb)[0])                   # [1, 2, 256, 256]
 
 ## Acknowledgements
 
-This code builds on [PVTv2](https://github.com/whai362/PVT), [CENet](https://github.com/xmindflow/CENet),
+This code builds on [PVTv2](https://github.com/whai362/PVT), [CENet](https://github.com/xmindflow/CENet), [DyDiLA](https://arxiv.org/abs/2601.13683v1)
 [Boundary DoU loss](https://github.com/sunfan-bvb/BoundaryDoULoss), [batchgenerators](https://github.com/MIC-DKFZ/batchgenerators)
 and [Qwen3-Embedding](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B).
