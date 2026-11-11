@@ -3,6 +3,7 @@
 
 <p align="center">
   <a href="https://arxiv.org/abs/2611.13425"><img src="https://img.shields.io/badge/arXiv-2611.13425-b31b1b.svg" alt="arXiv"></a>
+  <a href="https://huggingface.co/papers/2611.13425"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Paper-ffd21e.svg" alt="Hugging Face Paper"></a>
   <a href="https://moeinheidari7829.github.io/p2echo/"><img src="https://img.shields.io/badge/Project-Page-blue.svg" alt="Project Page"></a>
   <a href="https://drive.google.com/file/d/1wKF_MnWlMcpfYZTurb2wHOobENmhHQuj/view?usp=sharing"><img src="https://img.shields.io/badge/Checkpoint-Google%20Drive-34a853.svg" alt="Checkpoint"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-lightgrey.svg" alt="License"></a>
