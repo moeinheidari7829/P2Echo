@@ -2,7 +2,7 @@
 <h3 align="center">Text-Prompted Multi-View Echocardiography Segmentation with One Model</h3>
 
 <p align="center">
-  <a href="https://arxiv.org/abs/ARXIV_ID_PLACEHOLDER"><img src="https://img.shields.io/badge/arXiv-ARXIV_ID_PLACEHOLDER-b31b1b.svg" alt="arXiv"></a>
+  <a href="https://arxiv.org/abs/2611.13425"><img src="https://img.shields.io/badge/arXiv-2611.13425-b31b1b.svg" alt="arXiv"></a>
   <a href="https://moeinheidari7829.github.io/p2echo/"><img src="https://img.shields.io/badge/Project-Page-blue.svg" alt="Project Page"></a>
   <a href="https://drive.google.com/file/d/1wKF_MnWlMcpfYZTurb2wHOobENmhHQuj/view?usp=sharing"><img src="https://img.shields.io/badge/Checkpoint-Google%20Drive-34a853.svg" alt="Checkpoint"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-lightgrey.svg" alt="License"></a>
@@ -166,7 +166,7 @@ probs = torch.sigmoid(model(image, emb)[0])                   # [1, 2, 256, 256]
   author  = {Heidari, Moein and Kimbowa, Alvin and Tabatabaei, Mahdi and Bozorgpour, Afshin and
              Ghorbani Kolahi, Sina and Jiang, River and Chen, Wenjin and Foran, David J. and
              Grewal, Jasmine and Merhof, Dorit and Hacihaliloglu, Ilker},
-  journal = {arXiv preprint arXiv:ARXIV_ID_PLACEHOLDER},
+  journal = {arXiv preprint arXiv:2611.13425},
   year    = {2026}
 }
 ```
